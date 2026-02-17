@@ -1,0 +1,25 @@
+{
+  "name": "solana-rewards",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "ethers": "^6.13.2",
+    "next": "16.1.6",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "15.0.3",
+    "postcss": "^8.4.41",
+    "tailwindcss": "^3.4.17"
+  }
+}
